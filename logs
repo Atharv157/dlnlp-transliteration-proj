@@ -1,0 +1,804 @@
+============================= expt 3 ====================================================================================
+
+# Data configuration - Separate train/val/test files
+data_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/data"
+train_data_path: "hin_train.json"
+val_data_path: "hin_valid.json"     # New validation file
+test_data_path: "hin_test.json"
+sample_size: 100000
+sampling_method: "fast"
+batch_size: 256
+
+# Model configuration
+model_type: "transformer"  # Choose: "transformer" or "lstm"
+
+# Transformer-specific parameters
+d_model: 256
+nhead: 8
+num_encoder_layers: 2
+num_decoder_layers: 2
+dim_feedforward: 512
+transformer_dropout: 0.1
+max_len: 5000
+
+# LSTM-specific parameters (for backward compatibility)
+# embedding_dim: 128
+# hidden_dim: 256
+# num_layers: 2
+# dropout: 0.3
+
+# Training configuration
+learning_rate: 0.0005
+lr_decay_factor: 0.8
+lr_patience: 3
+min_lr: 1e-6
+num_epochs: 50
+teacher_forcing_ratio: 0.99
+final_teacher_forcing: 0.7
+teacher_forcing_decay: 0.985
+grad_clip: 1.0
+patience: 5
+seed: 42
+
+# Save configuration
+save_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/ckpts/expt3"
+
+
+
+
+import random
+from collections import defaultdict
+
+class HybridSampler:
+    def __init__(self, seed=42):
+        self.ortho_to_examples = defaultdict(set)
+        self.example_ortho_units = []
+        self.seed = seed
+        self.random_state = random.Random(seed)  # Separate random instance
+    
+    def _extract_orthographic_units(self, devanagari_word):
+        """Same deterministic function as before"""
+        characters = []
+        i = 0
+        n = len(devanagari_word)
+        
+        while i < n:
+            current_char = devanagari_word[i]
+            j = i + 1
+            
+            while j < n:
+                next_char = devanagari_word[j]
+                is_modifier = (
+                    ('\u093E' <= next_char <= '\u094C') or
+                    next_char == '\u094D' or next_char == '\u093C' or
+                    next_char == '\u0902' or next_char == '\u0901' or next_char == '\u0903'
+                )
+                if is_modifier:
+                    current_char += next_char
+                    j += 1
+                else:
+                    break
+            
+            characters.append(current_char)
+            i = j
+        
+        return characters
+    
+    def analyze_for_sampling(self, data_pairs):
+        """Same deterministic analysis"""
+        self.ortho_to_examples.clear()
+        self.example_ortho_units = []
+        
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            ortho_units = self._extract_orthographic_units(devanagari)
+            self.example_ortho_units.append((i, set(ortho_units)))
+            
+            for unit in ortho_units:
+                self.ortho_to_examples[unit].add(i)
+    
+    def stratified_sampling(self, data_pairs, target_size):
+        """Deterministic stratified sampling"""
+        buckets = {
+            'short': (1, 4), 'medium': (5, 8), 'long': (9, 12), 'xlong': (13, 50)
+        }
+        
+        # Group examples by length (deterministic)
+        bucket_contents = {name: [] for name in buckets}
+        for example in data_pairs:
+            roman_word, _ = example
+            length = len(roman_word)
+            for bucket_name, (min_len, max_len) in buckets.items():
+                if min_len <= length <= max_len:
+                    bucket_contents[bucket_name].append(example)
+                    break
+        
+        # Sort each bucket for deterministic sampling
+        for bucket_name in bucket_contents:
+            bucket_contents[bucket_name].sort()  # Sort tuples deterministically
+        
+        # Sample deterministically
+        final_samples = []
+        samples_per_bucket = target_size // len(buckets)
+        
+        for bucket_name, examples in bucket_contents.items():
+            if len(examples) <= samples_per_bucket:
+                final_samples.extend(examples)
+            else:
+                # Deterministic sampling: always take first N after sorting
+                final_samples.extend(examples[:samples_per_bucket])
+        
+        return final_samples
+    
+    def greedy_set_cover(self, data_pairs, max_examples):
+        """Already deterministic - no changes needed"""
+        self.analyze_for_sampling(data_pairs)
+        
+        selected_indices = []
+        covered_units = set()
+        remaining_units = set(self.ortho_to_examples.keys())
+        
+        print(f"Total unique orthographic units: {len(remaining_units)}")
+        
+        while remaining_units and len(selected_indices) < max_examples:
+            best_example = None
+            best_coverage = 0
+            
+            for example_idx, units in self.example_ortho_units:
+                if example_idx in selected_indices:
+                    continue
+                    
+                uncovered = units - covered_units
+                if len(uncovered) > best_coverage:
+                    best_coverage = len(uncovered)
+                    best_example = example_idx
+            
+            if best_example is None:
+                break
+            
+            selected_indices.append(best_example)
+            covered_units.update(self.example_ortho_units[best_example][1])
+            remaining_units = remaining_units - covered_units
+        
+        final_samples = [data_pairs[i] for i in selected_indices]
+        return final_samples, covered_units, selected_indices
+    
+    def frequency_based_sampling(self, data_pairs, target_size):
+        """Fast alternative: sample based on unit frequency"""
+        print("Using frequency-based sampling (fast)...")
+        
+        # Analyze units and their frequencies
+        unit_frequencies = defaultdict(int)
+        for _, devanagari in data_pairs:
+            units = self._extract_orthographic_units(devanagari)
+            for unit in set(units):  # Count each unit only once per example
+                unit_frequencies[unit] += 1
+        
+        # Score each example by sum of inverse frequencies of its units
+        # This prioritizes examples with rare units
+        example_scores = []
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            units = set(self._extract_orthographic_units(devanagari))
+            score = sum(1.0 / unit_frequencies[unit] for unit in units)
+            example_scores.append((score, i))
+        
+        # Sort by score (highest first) and take top examples
+        example_scores.sort(reverse=True)
+        selected_indices = [idx for _, idx in example_scores[:target_size]]
+        
+        # Calculate coverage for reporting
+        covered_units = set()
+        for idx in selected_indices:
+            _, devanagari = data_pairs[idx]
+            units = self._extract_orthographic_units(devanagari)
+            covered_units.update(units)
+        
+        print(f"✅ Frequency sampling: {len(selected_indices)} examples cover {len(covered_units)}/{len(unit_frequencies)} units")
+        
+        return [data_pairs[i] for i in selected_indices], covered_units
+    
+    def hybrid_sampling(self, data_pairs, target_size=100000, method="fast"):
+        """Hybrid sampling with speed options"""
+        print(f"Starting hybrid sampling (method: {method})...")
+        
+        if method == "fast":
+            # Use frequency-based for greedy phase (fastest)
+            print("Phase 1: Fast frequency-based sampling...")
+            greedy_samples, covered_units = self.frequency_based_sampling(data_pairs, target_size // 3)
+            # greedy_samples, covered_units = self.frequency_based_sampling(data_pairs, 75000)
+        # elif method == "batched":
+        #     # Use batched greedy (balanced)
+        #     print("Phase 1: Batched greedy set cover...")
+        #     greedy_samples, covered_units = self.batched_greedy_set_cover(data_pairs, target_size // 3)
+        else:
+            # Use full greedy (slow but optimal)
+            print("Phase 1: Greedy set cover...")
+            greedy_samples, covered_units = self.fast_greedy_set_cover(data_pairs, target_size // 3)
+        
+        print(f"Covered {len(covered_units)} units with {len(greedy_samples)} examples")
+        
+        # Get remaining data
+        greedy_set = set(greedy_samples)
+        remaining_data = [ex for ex in data_pairs if ex not in greedy_set]
+        
+        print(f"Phase 2: Stratified sampling...")
+        stratified_samples = self.stratified_sampling(remaining_data, target_size // 3)
+        # stratified_samples = self.stratified_sampling(remaining_data, 25000)
+        
+        # Get final remaining data
+        stratified_set = set(stratified_samples)
+        final_remaining = [ex for ex in remaining_data if ex not in stratified_set]
+        
+        print(f"Phase 3: Random sampling...")
+        random_needed = target_size - len(greedy_samples) - len(stratified_samples)
+        random_samples = random.sample(final_remaining, min(len(final_remaining), random_needed))
+        
+        final_samples = greedy_samples + stratified_samples + random_samples
+        
+        print(f"Final dataset: {len(final_samples)} examples")
+        return final_samples
+
+    def save_sampled_indices(self, data_pairs, output_path):
+        """Save the indices of sampled examples for exact reproducibility"""
+        sampled_data = self.hybrid_sampling(data_pairs)
+        
+        # Get indices of sampled examples in original data
+        sampled_indices = []
+        for sample in sampled_data:
+            try:
+                index = data_pairs.index(sample)
+                sampled_indices.append(index)
+            except ValueError:
+                # Handle case where exact match isn't found
+                pass
+        
+        # Save to file
+        with open(output_path, 'w') as f:
+            for idx in sampled_indices:
+                f.write(f"{idx}\n")
+        
+        print(f"Saved {len(sampled_indices)} indices to {output_path}")
+        return sampled_indices
+
+    def load_sampled_indices(self, data_pairs, indices_path):
+        """Load previously sampled indices"""
+        with open(indices_path, 'r') as f:
+            indices = [int(line.strip()) for line in f]
+        
+        sampled_data = [data_pairs[i] for i in indices]
+        print(f"Loaded {len(sampled_data)} examples from {indices_path}")
+        return sampled_data
+
+
+def test_orthographic_splitting():
+    """Test the orthographic splitting function"""
+    sampler = HybridSampler()
+    
+    test_words = ["जन्मदिवस", "रक्खा", "मिलीजुली", "पानी", "नमस्ते", "संस्कृत"]
+    
+    print("Testing orthographic splitting:")
+    for word in test_words:
+        units = sampler._extract_orthographic_units(word)
+        print(f"  {word} → {units}")
+
+
+def better_test_sampler():
+    """Better test with more diverse data"""
+    # Diverse test data covering different patterns
+    test_data = [
+        # Basic words
+        ("aam", "आम"),
+        ("pani", "पानी"),
+        ("desh", "देश"),
+        ("kitab", "किताब"),
+        
+        # Words with conjuncts
+        ("rakha", "रक्खा"),
+        ("vidya", "विद्या"),
+        ("sanskrit", "संस्कृत"),
+        
+        # Words with different vowel combinations
+        ("milijuli", "मिलीजुली"),
+        ("school", "स्कूल"),
+        ("janamdivas", "जन्मदिवस"),
+        
+        # Words with nasalizations
+        ("jaanchon", "जांचों"),
+        ("hindi", "हिंदी"),
+        
+        # Words with visarga
+        ("namah", "नमः"),
+        
+        # Longer words
+        ("chamkata", "चमकता"),
+        ("sundar", "सुंदर"),
+        ("kalam", "कलम"),
+        ("bharat", "भारत"),
+        ("vidyarthi", "विद्यार्थी"),
+        
+        # Additional variety
+        ("ghar", "घर"),
+        ("kaam", "काम"),
+        ("dost", "दोस्त"),
+        ("sach", "सच"),
+        ("pyar", "प्यार")
+    ]
+    
+    # Create more data points by adding variations
+    expanded_data = []
+    for roman, devanagari in test_data:
+        expanded_data.append((roman, devanagari))
+        # Add some simple variations
+        if len(roman) > 3:
+            expanded_data.append((roman + "a", devanagari + "ा"))
+            expanded_data.append(("a" + roman, "आ" + devanagari))
+    
+    print(f"Testing with {len(expanded_data)} diverse examples")
+    sampler = HybridSampler()
+    sampled = sampler.hybrid_sampling(expanded_data, 20)  # Target 20 samples
+    
+    print(f"\nFinal result: Sampled {len(sampled)} examples")
+    
+    # Analyze the sampled data
+    roman_lengths = [len(roman) for roman, _ in sampled]
+    unique_ortho_units = set()
+    for _, devanagari in sampled:
+        units = sampler._extract_orthographic_units(devanagari)
+        unique_ortho_units.update(units)
+    
+    print(f"Sampled data stats:")
+    print(f"  Roman word length range: {min(roman_lengths)}-{max(roman_lengths)}")
+    print(f"  Unique orthographic units in sample: {len(unique_ortho_units)}")
+    print(f"  Sample covers {len(unique_ortho_units)}/{len(sampler.ortho_to_examples)} total units")
+
+
+def stress_test_sampler():
+    """Test with larger dataset to ensure scalability"""
+    print("\n" + "="*50)
+    print("STRESS TEST WITH LARGER DATASET")
+    print("="*50)
+    
+    # Create a larger synthetic dataset
+    base_words = [
+        ("aam", "आम"), ("pani", "पानी"), ("desh", "देश"), ("kitab", "किताब"),
+        ("rakha", "रक्खा"), ("vidya", "विद्या"), ("school", "स्कूल"),
+        ("milijuli", "मिलीजुली"), ("janamdivas", "जन्मदिवस"), ("hindi", "हिंदी")
+    ]
+    
+    # Create 1000 examples by adding suffixes/prefixes
+    large_dataset = []
+    suffixes = ["", "a", "i", "aa", "ji", "saa", "ra", "na"]
+    prefixes = ["", "su", "pra", "vi", "a", "ni", "sam"]
+    
+    for roman_base, devanagari_base in base_words:
+        for prefix in prefixes[:3]:  # Use first 3 prefixes to keep it manageable
+            for suffix in suffixes[:3]:  # Use first 3 suffixes
+                if prefix or suffix:  # Avoid exact duplicates
+                    new_roman = prefix + roman_base + suffix
+                    new_devanagari = devanagari_base  # Simplified for test
+                    large_dataset.append((new_roman, new_devanagari))
+    
+    print(f"Created large dataset with {len(large_dataset)} examples")
+    
+    sampler = HybridSampler()
+    sampled = sampler.hybrid_sampling(large_dataset, 50)  # Sample 50 from large set
+    
+    print(f"Successfully sampled {len(sampled)} examples from {len(large_dataset)}")
+    print("Stress test passed! ✅")
+
+
+if __name__ == "__main__":
+    print("Testing Hybrid Sampler with Orthographic Units")
+    print("=" * 50)
+    
+    # Test 1: Orthographic splitting
+    test_orthographic_splitting()
+    print()
+    
+    # Test 2: Basic sampler functionality
+    better_test_sampler()
+    
+    # Test 3: Stress test
+    stress_test_sampler()
+    
+========================================================================================================================
+expt4
+=====================================================================
+import random
+from collections import defaultdict
+
+class HybridSampler:
+    def __init__(self, seed=42):
+        self.ortho_to_examples = defaultdict(set)
+        self.example_ortho_units = []
+        self.seed = seed
+        self.random_state = random.Random(seed)  # Separate random instance
+    
+    def _extract_orthographic_units(self, devanagari_word):
+        """Same deterministic function as before"""
+        characters = []
+        i = 0
+        n = len(devanagari_word)
+        
+        while i < n:
+            current_char = devanagari_word[i]
+            j = i + 1
+            
+            while j < n:
+                next_char = devanagari_word[j]
+                is_modifier = (
+                    ('\u093E' <= next_char <= '\u094C') or
+                    next_char == '\u094D' or next_char == '\u093C' or
+                    next_char == '\u0902' or next_char == '\u0901' or next_char == '\u0903'
+                )
+                if is_modifier:
+                    current_char += next_char
+                    j += 1
+                else:
+                    break
+            
+            characters.append(current_char)
+            i = j
+        
+        return characters
+    
+    def analyze_for_sampling(self, data_pairs):
+        """Same deterministic analysis"""
+        self.ortho_to_examples.clear()
+        self.example_ortho_units = []
+        
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            ortho_units = self._extract_orthographic_units(devanagari)
+            self.example_ortho_units.append((i, set(ortho_units)))
+            
+            for unit in ortho_units:
+                self.ortho_to_examples[unit].add(i)
+    
+    def stratified_sampling(self, data_pairs, target_size):
+        """Deterministic stratified sampling"""
+        buckets = {
+            'short': (1, 4), 'medium': (5, 8), 'long': (9, 12), 'xlong': (13, 50)
+        }
+        
+        # Group examples by length (deterministic)
+        bucket_contents = {name: [] for name in buckets}
+        for example in data_pairs:
+            roman_word, _ = example
+            length = len(roman_word)
+            for bucket_name, (min_len, max_len) in buckets.items():
+                if min_len <= length <= max_len:
+                    bucket_contents[bucket_name].append(example)
+                    break
+        
+        # Sort each bucket for deterministic sampling
+        for bucket_name in bucket_contents:
+            bucket_contents[bucket_name].sort()  # Sort tuples deterministically
+        
+        # Sample deterministically
+        final_samples = []
+        samples_per_bucket = target_size // len(buckets)
+        
+        for bucket_name, examples in bucket_contents.items():
+            if len(examples) <= samples_per_bucket:
+                final_samples.extend(examples)
+            else:
+                # Deterministic sampling: always take first N after sorting
+                final_samples.extend(examples[:samples_per_bucket])
+        
+        return final_samples
+    
+    def greedy_set_cover(self, data_pairs, max_examples):
+        """Already deterministic - no changes needed"""
+        self.analyze_for_sampling(data_pairs)
+        
+        selected_indices = []
+        covered_units = set()
+        remaining_units = set(self.ortho_to_examples.keys())
+        
+        print(f"Total unique orthographic units: {len(remaining_units)}")
+        
+        while remaining_units and len(selected_indices) < max_examples:
+            best_example = None
+            best_coverage = 0
+            
+            for example_idx, units in self.example_ortho_units:
+                if example_idx in selected_indices:
+                    continue
+                    
+                uncovered = units - covered_units
+                if len(uncovered) > best_coverage:
+                    best_coverage = len(uncovered)
+                    best_example = example_idx
+            
+            if best_example is None:
+                break
+            
+            selected_indices.append(best_example)
+            covered_units.update(self.example_ortho_units[best_example][1])
+            remaining_units = remaining_units - covered_units
+        
+        final_samples = [data_pairs[i] for i in selected_indices]
+        return final_samples, covered_units, selected_indices
+    
+    def frequency_based_sampling(self, data_pairs, target_size):
+        """Fast alternative: sample based on unit frequency"""
+        print("Using frequency-based sampling (fast)...")
+        
+        # Analyze units and their frequencies
+        unit_frequencies = defaultdict(int)
+        for _, devanagari in data_pairs:
+            units = self._extract_orthographic_units(devanagari)
+            for unit in set(units):  # Count each unit only once per example
+                unit_frequencies[unit] += 1
+        
+        # Score each example by sum of inverse frequencies of its units
+        # This prioritizes examples with rare units
+        example_scores = []
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            units = set(self._extract_orthographic_units(devanagari))
+            score = sum(1.0 / unit_frequencies[unit] for unit in units)
+            example_scores.append((score, i))
+        
+        # Sort by score (highest first) and take top examples
+        example_scores.sort(reverse=True)
+        selected_indices = [idx for _, idx in example_scores[:target_size]]
+        
+        # Calculate coverage for reporting
+        covered_units = set()
+        for idx in selected_indices:
+            _, devanagari = data_pairs[idx]
+            units = self._extract_orthographic_units(devanagari)
+            covered_units.update(units)
+        
+        print(f"✅ Frequency sampling: {len(selected_indices)} examples cover {len(covered_units)}/{len(unit_frequencies)} units")
+        
+        return [data_pairs[i] for i in selected_indices], covered_units
+    
+    def hybrid_sampling(self, data_pairs, target_size=100000, method="fast"):
+        """Hybrid sampling with speed options"""
+        print(f"Starting hybrid sampling (method: {method})...")
+        
+        if method == "fast":
+            # Use frequency-based for greedy phase (fastest)
+            print("Phase 1: Fast frequency-based sampling...")
+            # greedy_samples, covered_units = self.frequency_based_sampling(data_pairs, target_size // 2)
+            greedy_samples, covered_units = self.frequency_based_sampling(data_pairs, target_size // 4)
+        # elif method == "batched":
+        #     # Use batched greedy (balanced)
+        #     print("Phase 1: Batched greedy set cover...")
+        #     greedy_samples, covered_units = self.batched_greedy_set_cover(data_pairs, target_size // 3)
+        else:
+            # Use full greedy (slow but optimal)
+            print("Phase 1: Greedy set cover...")
+            greedy_samples, covered_units = self.fast_greedy_set_cover(data_pairs, target_size // 3)
+        
+        print(f"Covered {len(covered_units)} units with {len(greedy_samples)} examples")
+        
+        # Get remaining data
+        greedy_set = set(greedy_samples)
+        remaining_data = [ex for ex in data_pairs if ex not in greedy_set]
+        
+        print(f"Phase 2: Stratified sampling...")
+        # stratified_samples = self.stratified_sampling(remaining_data, target_size // 3)
+        stratified_samples = self.stratified_sampling(remaining_data, target_size // 4)
+        
+        # Get final remaining data
+        stratified_set = set(stratified_samples)
+        final_remaining = [ex for ex in remaining_data if ex not in stratified_set]
+        
+        print(f"Phase 3: Random sampling...")
+        random_needed = target_size - len(greedy_samples) - len(stratified_samples)
+        random_samples = random.sample(final_remaining, min(len(final_remaining), random_needed))
+        
+        final_samples = greedy_samples + stratified_samples + random_samples
+        
+        print(f"Final dataset: {len(final_samples)} examples")
+        return final_samples
+
+    def save_sampled_indices(self, data_pairs, output_path):
+        """Save the indices of sampled examples for exact reproducibility"""
+        sampled_data = self.hybrid_sampling(data_pairs)
+        
+        # Get indices of sampled examples in original data
+        sampled_indices = []
+        for sample in sampled_data:
+            try:
+                index = data_pairs.index(sample)
+                sampled_indices.append(index)
+            except ValueError:
+                # Handle case where exact match isn't found
+                pass
+        
+        # Save to file
+        with open(output_path, 'w') as f:
+            for idx in sampled_indices:
+                f.write(f"{idx}\n")
+        
+        print(f"Saved {len(sampled_indices)} indices to {output_path}")
+        return sampled_indices
+
+    def load_sampled_indices(self, data_pairs, indices_path):
+        """Load previously sampled indices"""
+        with open(indices_path, 'r') as f:
+            indices = [int(line.strip()) for line in f]
+        
+        sampled_data = [data_pairs[i] for i in indices]
+        print(f"Loaded {len(sampled_data)} examples from {indices_path}")
+        return sampled_data
+
+
+def test_orthographic_splitting():
+    """Test the orthographic splitting function"""
+    sampler = HybridSampler()
+    
+    test_words = ["जन्मदिवस", "रक्खा", "मिलीजुली", "पानी", "नमस्ते", "संस्कृत"]
+    
+    print("Testing orthographic splitting:")
+    for word in test_words:
+        units = sampler._extract_orthographic_units(word)
+        print(f"  {word} → {units}")
+
+
+def better_test_sampler():
+    """Better test with more diverse data"""
+    # Diverse test data covering different patterns
+    test_data = [
+        # Basic words
+        ("aam", "आम"),
+        ("pani", "पानी"),
+        ("desh", "देश"),
+        ("kitab", "किताब"),
+        
+        # Words with conjuncts
+        ("rakha", "रक्खा"),
+        ("vidya", "विद्या"),
+        ("sanskrit", "संस्कृत"),
+        
+        # Words with different vowel combinations
+        ("milijuli", "मिलीजुली"),
+        ("school", "स्कूल"),
+        ("janamdivas", "जन्मदिवस"),
+        
+        # Words with nasalizations
+        ("jaanchon", "जांचों"),
+        ("hindi", "हिंदी"),
+        
+        # Words with visarga
+        ("namah", "नमः"),
+        
+        # Longer words
+        ("chamkata", "चमकता"),
+        ("sundar", "सुंदर"),
+        ("kalam", "कलम"),
+        ("bharat", "भारत"),
+        ("vidyarthi", "विद्यार्थी"),
+        
+        # Additional variety
+        ("ghar", "घर"),
+        ("kaam", "काम"),
+        ("dost", "दोस्त"),
+        ("sach", "सच"),
+        ("pyar", "प्यार")
+    ]
+    
+    # Create more data points by adding variations
+    expanded_data = []
+    for roman, devanagari in test_data:
+        expanded_data.append((roman, devanagari))
+        # Add some simple variations
+        if len(roman) > 3:
+            expanded_data.append((roman + "a", devanagari + "ा"))
+            expanded_data.append(("a" + roman, "आ" + devanagari))
+    
+    print(f"Testing with {len(expanded_data)} diverse examples")
+    sampler = HybridSampler()
+    sampled = sampler.hybrid_sampling(expanded_data, 20)  # Target 20 samples
+    
+    print(f"\nFinal result: Sampled {len(sampled)} examples")
+    
+    # Analyze the sampled data
+    roman_lengths = [len(roman) for roman, _ in sampled]
+    unique_ortho_units = set()
+    for _, devanagari in sampled:
+        units = sampler._extract_orthographic_units(devanagari)
+        unique_ortho_units.update(units)
+    
+    print(f"Sampled data stats:")
+    print(f"  Roman word length range: {min(roman_lengths)}-{max(roman_lengths)}")
+    print(f"  Unique orthographic units in sample: {len(unique_ortho_units)}")
+    print(f"  Sample covers {len(unique_ortho_units)}/{len(sampler.ortho_to_examples)} total units")
+
+
+def stress_test_sampler():
+    """Test with larger dataset to ensure scalability"""
+    print("\n" + "="*50)
+    print("STRESS TEST WITH LARGER DATASET")
+    print("="*50)
+    
+    # Create a larger synthetic dataset
+    base_words = [
+        ("aam", "आम"), ("pani", "पानी"), ("desh", "देश"), ("kitab", "किताब"),
+        ("rakha", "रक्खा"), ("vidya", "विद्या"), ("school", "स्कूल"),
+        ("milijuli", "मिलीजुली"), ("janamdivas", "जन्मदिवस"), ("hindi", "हिंदी")
+    ]
+    
+    # Create 1000 examples by adding suffixes/prefixes
+    large_dataset = []
+    suffixes = ["", "a", "i", "aa", "ji", "saa", "ra", "na"]
+    prefixes = ["", "su", "pra", "vi", "a", "ni", "sam"]
+    
+    for roman_base, devanagari_base in base_words:
+        for prefix in prefixes[:3]:  # Use first 3 prefixes to keep it manageable
+            for suffix in suffixes[:3]:  # Use first 3 suffixes
+                if prefix or suffix:  # Avoid exact duplicates
+                    new_roman = prefix + roman_base + suffix
+                    new_devanagari = devanagari_base  # Simplified for test
+                    large_dataset.append((new_roman, new_devanagari))
+    
+    print(f"Created large dataset with {len(large_dataset)} examples")
+    
+    sampler = HybridSampler()
+    sampled = sampler.hybrid_sampling(large_dataset, 50)  # Sample 50 from large set
+    
+    print(f"Successfully sampled {len(sampled)} examples from {len(large_dataset)}")
+    print("Stress test passed! ✅")
+
+
+if __name__ == "__main__":
+    print("Testing Hybrid Sampler with Orthographic Units")
+    print("=" * 50)
+    
+    # Test 1: Orthographic splitting
+    test_orthographic_splitting()
+    print()
+    
+    # Test 2: Basic sampler functionality
+    better_test_sampler()
+    
+    # Test 3: Stress test
+    stress_test_sampler()
+    
+    
+# Data configuration - Separate train/val/test files
+data_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/data"
+train_data_path: "hin_train.json"
+val_data_path: "hin_valid.json"     # New validation file
+test_data_path: "hin_test.json"
+sample_size: 100000
+sampling_method: "fast"
+batch_size: 256
+
+# Model configuration
+model_type: "transformer"  # Choose: "transformer" or "lstm"
+
+# Transformer-specific parameters
+d_model: 256
+nhead: 8
+num_encoder_layers: 2
+num_decoder_layers: 2
+dim_feedforward: 512
+transformer_dropout: 0.1
+max_len: 5000
+
+# LSTM-specific parameters (for backward compatibility)
+# embedding_dim: 128
+# hidden_dim: 256
+# num_layers: 2
+# dropout: 0.3
+
+# Training configuration
+learning_rate: 0.0005
+lr_decay_factor: 0.8
+lr_patience: 3
+min_lr: 1e-6
+num_epochs: 50
+teacher_forcing_ratio: 0.99
+final_teacher_forcing: 0.7
+teacher_forcing_decay: 0.985
+grad_clip: 1.0
+patience: 7
+seed: 42
+
+# Save configuration
+save_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/ckpts/expt4"
+
+

@@ -1,0 +1,10 @@
+Ckpt,val loss,val acc,exact,f1,optimizer,config
+checkpoint_epoch45_loam_expt1.pt,,,0.4183,0.873,loam,"256, 512, dropout 0.2, tf 0.99-0.6 tf-decay 0.995"
+checkpoint_epoch5_loam_expt2.pt,,,,,loam,"_model: 320
+nhead: 8
+num_encoder_layers: 2
+num_decoder_layers: 2
+dim_feedforward: 768
+transformer_dropout: 0.33
+teacher_forcing_ratio: 0.99 final_teacher_forcing: 0.6 teacher_forcing_decay: 0.985"
+checkpoint_epoch_transformer_v1_with_tf.pt,,,0.4273,0.8754,Adam,256/512

@@ -1,0 +1,13 @@
+# Ignore the outer data/ folder
+/data/
+
+# But don’t ignore src/data/
+!/src/data/
+.env
+prompts.txt
+__pycache__/*
+
+saved_models/*
+src/models/__pycache__/*
+src/evaluate/__pycache__/evaluate_model_beam.cpython-312.pyc
+src/evaluate/__pycache__/evaluate_model.cpython-312.pyc

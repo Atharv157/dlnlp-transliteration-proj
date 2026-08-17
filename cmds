@@ -1,0 +1,4 @@
+python demo.py --lstm-checkpoint saved_models/lstm/checkpoint_expt1_epoch_17.pth --transformer-checkpoint saved_models/transformer/checkpoint_expt5_epoch35.pt
+
+
+grep -E '"english word": "[^"]*[A-Z]' hin_train.json

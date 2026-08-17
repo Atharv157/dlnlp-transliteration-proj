@@ -1,0 +1,30 @@
+# Data configuration - Separate train/val/test files
+data_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/data"
+train_data_path: "hin_train.json"
+val_data_path: "hin_valid.json"     # New validation file
+test_data_path: "hin_test.json"
+sample_size: 100000
+sampling_method: "fast"
+batch_size: 128
+
+# Model configuration
+embedding_dim: 128
+hidden_dim: 256
+num_layers: 2
+dropout: 0.1
+
+# Training configuration
+learning_rate: 0.001
+lr_decay_factor: 0.8
+lr_patience: 3
+min_lr: 1e-6
+num_epochs: 50
+teacher_forcing_ratio: 0.99
+final_teacher_forcing: 0.7
+teacher_forcing_decay: 0.95
+grad_clip: 1.0
+patience: 7
+seed: 42
+
+# Save configuration
+save_dir: "/content/drive/MyDrive/dlnlp-assignment/assignment2/ckpts"

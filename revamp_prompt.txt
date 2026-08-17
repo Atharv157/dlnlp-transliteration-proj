@@ -1,0 +1,1054 @@
+vocabulary.py
+class Vocabulary:
+    def __init__(self, name):
+        self.name = name
+        self.char2idx = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
+        self.idx2char = {0: '<pad>', 1: '<sos>', 2: '<eos>', 3: '<unk>'}
+        self.n_chars = 4
+    
+    def add_text(self, text):
+        """Add characters from text to vocabulary"""
+        for char in text:
+            if char not in self.char2idx:
+                self.char2idx[char] = self.n_chars
+                self.idx2char[self.n_chars] = char
+                self.n_chars += 1
+    
+    def encode(self, text):
+        """Convert text to indices, adding SOS and EOS tokens"""
+        indices = [self.char2idx.get(char, self.char2idx['<unk>']) for char in text]
+        return [self.char2idx['<sos>']] + indices + [self.char2idx['<eos>']]
+    
+    def decode(self, indices):
+        """Convert indices back to text"""
+        chars = []
+        for idx in indices:
+            if idx in [self.char2idx['<sos>'], self.char2idx['<eos>'], self.char2idx['<pad>']]:
+                continue
+            chars.append(self.idx2char.get(idx, '<unk>'))
+        return ''.join(chars)
+    
+    def __len__(self):
+        return self.n_chars
+
+class RomanVocabulary(Vocabulary):
+    def __init__(self):
+        super().__init__("roman")
+    
+    @staticmethod
+    def split_roman_word(word):
+        """Split Roman word into characters (lowercase)"""
+        return list(word.lower())
+
+class DevanagariVocabulary(Vocabulary):
+    def __init__(self):
+        super().__init__("devanagari")
+    
+    
+    @staticmethod
+    def split_devanagari_word(word):
+        """Split Devanagari word into simple Unicode characters - SIMPLE APPROACH"""
+        return list(word)
+
+
+sampler.py
+import random
+from collections import defaultdict
+
+import random
+from collections import defaultdict
+
+class HybridSampler:
+    def __init__(self, seed=42):
+        self.ortho_to_examples = defaultdict(set)
+        self.example_ortho_units = []
+        self.seed = seed
+        self.random_state = random.Random(seed)  # Separate random instance
+    
+    def _extract_orthographic_units(self, devanagari_word):
+        """Same deterministic function as before"""
+        characters = []
+        i = 0
+        n = len(devanagari_word)
+        
+        while i < n:
+            current_char = devanagari_word[i]
+            j = i + 1
+            
+            while j < n:
+                next_char = devanagari_word[j]
+                is_modifier = (
+                    ('\u093E' <= next_char <= '\u094C') or
+                    next_char == '\u094D' or next_char == '\u093C' or
+                    next_char == '\u0902' or next_char == '\u0901' or next_char == '\u0903'
+                )
+                if is_modifier:
+                    current_char += next_char
+                    j += 1
+                else:
+                    break
+            
+            characters.append(current_char)
+            i = j
+        
+        return characters
+    
+    def analyze_for_sampling(self, data_pairs):
+        """Same deterministic analysis"""
+        self.ortho_to_examples.clear()
+        self.example_ortho_units = []
+        
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            ortho_units = self._extract_orthographic_units(devanagari)
+            self.example_ortho_units.append((i, set(ortho_units)))
+            
+            for unit in ortho_units:
+                self.ortho_to_examples[unit].add(i)
+    
+    def stratified_sampling(self, data_pairs, target_size):
+        """Deterministic stratified sampling"""
+        buckets = {
+            'short': (1, 4), 'medium': (5, 8), 'long': (9, 12), 'xlong': (13, 50)
+        }
+        
+        # Group examples by length (deterministic)
+        bucket_contents = {name: [] for name in buckets}
+        for example in data_pairs:
+            roman_word, _ = example
+            length = len(roman_word)
+            for bucket_name, (min_len, max_len) in buckets.items():
+                if min_len <= length <= max_len:
+                    bucket_contents[bucket_name].append(example)
+                    break
+        
+        # Sort each bucket for deterministic sampling
+        for bucket_name in bucket_contents:
+            bucket_contents[bucket_name].sort()  # Sort tuples deterministically
+        
+        # Sample deterministically
+        final_samples = []
+        samples_per_bucket = target_size // len(buckets)
+        
+        for bucket_name, examples in bucket_contents.items():
+            if len(examples) <= samples_per_bucket:
+                final_samples.extend(examples)
+            else:
+                # Deterministic sampling: always take first N after sorting
+                final_samples.extend(examples[:samples_per_bucket])
+        
+        return final_samples
+    
+    def greedy_set_cover(self, data_pairs, max_examples):
+        """Already deterministic - no changes needed"""
+        self.analyze_for_sampling(data_pairs)
+        
+        selected_indices = []
+        covered_units = set()
+        remaining_units = set(self.ortho_to_examples.keys())
+        
+        print(f"Total unique orthographic units: {len(remaining_units)}")
+        
+        while remaining_units and len(selected_indices) < max_examples:
+            best_example = None
+            best_coverage = 0
+            
+            for example_idx, units in self.example_ortho_units:
+                if example_idx in selected_indices:
+                    continue
+                    
+                uncovered = units - covered_units
+                if len(uncovered) > best_coverage:
+                    best_coverage = len(uncovered)
+                    best_example = example_idx
+            
+            if best_example is None:
+                break
+            
+            selected_indices.append(best_example)
+            covered_units.update(self.example_ortho_units[best_example][1])
+            remaining_units = remaining_units - covered_units
+        
+        final_samples = [data_pairs[i] for i in selected_indices]
+        return final_samples, covered_units, selected_indices
+    
+    def frequency_based_sampling(self, data_pairs, target_size):
+        """Fast alternative: sample based on unit frequency"""
+        print("Using frequency-based sampling (fast)...")
+        
+        # Analyze units and their frequencies
+        unit_frequencies = defaultdict(int)
+        for _, devanagari in data_pairs:
+            units = self._extract_orthographic_units(devanagari)
+            for unit in set(units):  # Count each unit only once per example
+                unit_frequencies[unit] += 1
+        
+        # Score each example by sum of inverse frequencies of its units
+        # This prioritizes examples with rare units
+        example_scores = []
+        for i, (roman, devanagari) in enumerate(data_pairs):
+            units = set(self._extract_orthographic_units(devanagari))
+            score = sum(1.0 / unit_frequencies[unit] for unit in units)
+            example_scores.append((score, i))
+        
+        # Sort by score (highest first) and take top examples
+        example_scores.sort(reverse=True)
+        selected_indices = [idx for _, idx in example_scores[:target_size]]
+        
+        # Calculate coverage for reporting
+        covered_units = set()
+        for idx in selected_indices:
+            _, devanagari = data_pairs[idx]
+            units = self._extract_orthographic_units(devanagari)
+            covered_units.update(units)
+        
+        print(f"✅ Frequency sampling: {len(selected_indices)} examples cover {len(covered_units)}/{len(unit_frequencies)} units")
+        
+        return [data_pairs[i] for i in selected_indices], covered_units
+    
+    def hybrid_sampling(self, data_pairs, target_size=100000, method="fast"):
+        """Hybrid sampling with speed options"""
+        print(f"Starting hybrid sampling (method: {method})...")
+        
+        if method == "fast":
+            # Use frequency-based for greedy phase (fastest)
+            print("Phase 1: Fast frequency-based sampling...")
+            greedy_samples, covered_units = self.frequency_based_sampling(data_pairs, target_size // 2)
+        # elif method == "batched":
+        #     # Use batched greedy (balanced)
+        #     print("Phase 1: Batched greedy set cover...")
+        #     greedy_samples, covered_units = self.batched_greedy_set_cover(data_pairs, target_size // 3)
+        else:
+            # Use full greedy (slow but optimal)
+            print("Phase 1: Greedy set cover...")
+            greedy_samples, covered_units = self.fast_greedy_set_cover(data_pairs, target_size // 3)
+        
+        print(f"Covered {len(covered_units)} units with {len(greedy_samples)} examples")
+        
+        # Get remaining data
+        greedy_set = set(greedy_samples)
+        remaining_data = [ex for ex in data_pairs if ex not in greedy_set]
+        
+        print(f"Phase 2: Stratified sampling...")
+        stratified_samples = self.stratified_sampling(remaining_data, target_size // 3)
+        
+        # Get final remaining data
+        stratified_set = set(stratified_samples)
+        final_remaining = [ex for ex in remaining_data if ex not in stratified_set]
+        
+        print(f"Phase 3: Random sampling...")
+        random_needed = target_size - len(greedy_samples) - len(stratified_samples)
+        random_samples = random.sample(final_remaining, min(len(final_remaining), random_needed))
+        
+        final_samples = greedy_samples + stratified_samples + random_samples
+        
+        print(f"Final dataset: {len(final_samples)} examples")
+        return final_samples
+
+    def save_sampled_indices(self, data_pairs, output_path):
+        """Save the indices of sampled examples for exact reproducibility"""
+        sampled_data = self.hybrid_sampling(data_pairs)
+        
+        # Get indices of sampled examples in original data
+        sampled_indices = []
+        for sample in sampled_data:
+            try:
+                index = data_pairs.index(sample)
+                sampled_indices.append(index)
+            except ValueError:
+                # Handle case where exact match isn't found
+                pass
+        
+        # Save to file
+        with open(output_path, 'w') as f:
+            for idx in sampled_indices:
+                f.write(f"{idx}\n")
+        
+        print(f"Saved {len(sampled_indices)} indices to {output_path}")
+        return sampled_indices
+
+    def load_sampled_indices(self, data_pairs, indices_path):
+        """Load previously sampled indices"""
+        with open(indices_path, 'r') as f:
+            indices = [int(line.strip()) for line in f]
+        
+        sampled_data = [data_pairs[i] for i in indices]
+        print(f"Loaded {len(sampled_data)} examples from {indices_path}")
+        return sampled_data
+
+
+preprocessor.py
+import json
+import os
+from src.data.vocabulary import RomanVocabulary, DevanagariVocabulary
+from src.data.dataset import TransliterationDataset, collate_fn
+from src.data.sampler import HybridSampler
+from torch.utils.data import DataLoader
+from pathlib import Path
+
+
+class DataPreprocessor:
+    def __init__(self, config):
+        self.config = config
+        seed = self.config.get('seed', 42)
+        self.sampler = HybridSampler(seed=seed)
+    
+    def load_jsonl_data(self, file_path):
+        """Load data from JSONL file (Aksharantar format)"""
+        data_pairs = []
+        
+        # Construct full path
+        data_dir = self.config.get('data_dir', 'data/raw/aksharantar')
+        full_path = os.path.join(data_dir, file_path)
+        
+        print(f"Loading data from: {full_path}")
+        
+        if not os.path.exists(full_path):
+            print(f"❌ File not found: {full_path}")
+            return []
+        
+        with open(full_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f):
+                if line.strip():
+                    try:
+                        item = json.loads(line.strip())
+                        # Aksharantar format: "english_word" and "native_word"
+                        roman_word = item.get('english word', '').strip()
+                        devanagari_word = item.get('native word', '').strip()
+                        
+                        if roman_word and devanagari_word:
+                            data_pairs.append((roman_word, devanagari_word))
+                    
+                    except json.JSONDecodeError as e:
+                        print(f"❌ Error parsing line {line_num}: {e}")
+                        continue
+                    except Exception as e:
+                        print(f"❌ Unexpected error on line {line_num}: {e}")
+                        continue
+        
+        print(f"✅ Loaded {len(data_pairs)} valid examples from {file_path}")
+        return data_pairs
+    
+    def build_vocabularies(self, data_pairs):
+        """Build Roman and Devanagari vocabularies from data"""
+        roman_vocab = RomanVocabulary()
+        devanagari_vocab = DevanagariVocabulary()
+        
+        for roman_word, devanagari_word in data_pairs:
+            roman_chars = roman_vocab.split_roman_word(roman_word)
+            devanagari_chars = devanagari_vocab.split_devanagari_word(devanagari_word)
+            
+            roman_vocab.add_text(roman_chars)
+            devanagari_vocab.add_text(devanagari_chars)
+        
+        print(f"📖 Roman vocabulary size: {len(roman_vocab)}")
+        print(f"📖 Devanagari vocabulary size: {len(devanagari_vocab)}")
+        
+        return roman_vocab, devanagari_vocab
+    
+    def prepare_data(self):
+        """Main method to prepare all data with separate train/val/test files"""
+        # Load TRAINING data
+        train_data_path = self.config.get('train_data_path')
+        train_pairs = self.load_jsonl_data(train_data_path)
+        
+        if not train_pairs:
+            raise ValueError(f"❌ No training data found at {train_data_path}")
+        
+        # Load VALIDATION data (separate file)
+        val_data_path = self.config.get('val_data_path')
+        val_pairs = self.load_jsonl_data(val_data_path)
+        
+        if not val_pairs:
+            raise ValueError(f"❌ No validation data found at {val_data_path}")
+        
+        # Load TEST data (completely separate)
+        test_data_path = self.config.get('test_data_path')
+        test_pairs = self.load_jsonl_data(test_data_path)
+        
+        if not test_pairs:
+            print(f"⚠️  No test data found at {test_data_path}")
+            test_pairs = []
+        
+        print(f"📊 Data Statistics:")
+        print(f"   • Training data: {len(train_pairs)} examples")
+        print(f"   • Validation data: {len(val_pairs)} examples") 
+        print(f"   • Test data: {len(test_pairs)} examples")
+        
+        # Apply hybrid sampling only to TRAINING data
+        sample_size = self.config.get('sample_size', 100000)
+        if sample_size < len(train_pairs):
+            print(f"🎯 Sampling {sample_size} examples from {len(train_pairs)} training examples")
+            sampled_train_pairs = self.sampler.hybrid_sampling(train_pairs, 
+                                                               sample_size,
+                                                               method=self.config.get('sampling_method', 'fast') )
+        else:
+            print(f"🎯 Using all {len(train_pairs)} training examples")
+            sampled_train_pairs = train_pairs
+        
+        # Build vocabularies from SAMPLED TRAINING data only
+        print("\n📚 Building vocabularies from training data...")
+        roman_vocab, devanagari_vocab = self.build_vocabularies(sampled_train_pairs)
+        
+        # Create data loaders
+        batch_size = self.config.get('batch_size', 32)
+        
+        train_loader = self._create_data_loader(
+            sampled_train_pairs, 
+            roman_vocab, devanagari_vocab, batch_size, shuffle=True,
+            num_workers=4,           # Add this
+            pin_memory=True,         # Add this
+            persistent_workers=True, # Add this
+            prefetch_factor=2
+            )
+        val_loader = self._create_data_loader(val_pairs, roman_vocab, devanagari_vocab, batch_size, shuffle=False)
+        test_loader = self._create_data_loader(test_pairs, roman_vocab, devanagari_vocab, batch_size, shuffle=False)
+        
+        return train_loader, val_loader, test_loader, roman_vocab, devanagari_vocab
+    
+    def _create_data_loader(self, data_pairs, roman_vocab, devanagari_vocab, batch_size, shuffle=False, **kwargs):
+        """Create a DataLoader for given data pairs"""
+        dataset = TransliterationDataset(data_pairs, roman_vocab, devanagari_vocab)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, **kwargs)
+
+dataset.py
+import torch
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+
+class TransliterationDataset(Dataset):
+    def __init__(self, data_pairs, roman_vocab, devanagari_vocab):
+        self.data_pairs = data_pairs
+        self.roman_vocab = roman_vocab
+        self.devanagari_vocab = devanagari_vocab
+    
+    def __len__(self):
+        return len(self.data_pairs)
+    
+    def __getitem__(self, idx):
+        roman_word, devanagari_word = self.data_pairs[idx]
+        
+        # Split into characters/syllables
+        roman_chars = self.roman_vocab.split_roman_word(roman_word)
+        devanagari_chars = self.devanagari_vocab.split_devanagari_word(devanagari_word)
+        
+        # Encode to indices
+        roman_encoded = self.roman_vocab.encode(roman_chars)
+        devanagari_encoded = self.devanagari_vocab.encode(devanagari_chars)
+        
+        return (
+            torch.tensor(roman_encoded, dtype=torch.long),
+            torch.tensor(devanagari_encoded, dtype=torch.long)
+        )
+
+def collate_fn(batch):
+    """Custom collate function to pad variable length sequences and return lengths"""
+    roman_sequences, devanagari_sequences = zip(*batch)
+    
+    # Get sequence lengths before padding
+    roman_lengths = [len(seq) for seq in roman_sequences]
+    devanagari_lengths = [len(seq) for seq in devanagari_sequences]
+    
+    # Pad sequences
+    roman_padded = pad_sequence(roman_sequences, batch_first=True, padding_value=0)
+    devanagari_padded = pad_sequence(devanagari_sequences, batch_first=True, padding_value=0)
+    
+    return (
+        roman_padded, 
+        devanagari_padded,
+        torch.tensor(roman_lengths, dtype=torch.long),
+        torch.tensor(devanagari_lengths, dtype=torch.long)
+    )
+
+so this is the training script i have been using
+
+# train_transformer_translit.py
+"""
+Single-file Transformer encoder-decoder + training loop for transliteration.
+
+Usage:
+    python train_transformer_translit.py --config path/to/config.yaml
+
+If you want to run programmatically, import main(config_dict).
+"""
+
+import argparse
+import math
+import os
+import random
+import time
+from typing import Tuple, List
+
+import yaml
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader
+
+# IMPORTS FROM YOUR PROJECT (adjust module paths if needed)
+from src.data.vocabulary import RomanVocabulary, DevanagariVocabulary
+from src.data.dataset import TransliterationDataset, collate_fn
+from src.data.preprocessor import DataPreprocessor  # uses sampler internally
+# If you placed preprocessor in a different module path, adjust imports accordingly.
+
+_mask_cache = {}
+# -------------------------
+# Utility: positional encoding
+# -------------------------
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        if d_model % 2 == 1:
+            # odd d_model: last column remains zero for cos
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x : (batch, seq_len, d_model)
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len, :].to(x.device)
+        return x
+
+
+# -------------------------
+# Transformer seq2seq model
+# -------------------------
+class TransformerSeq2Seq(nn.Module):
+    def __init__(
+        self,
+        src_vocab_size: int,
+        tgt_vocab_size: int,
+        d_model: int = 256,
+        nhead: int = 8,
+        num_encoder_layers: int = 3,
+        num_decoder_layers: int = 3,
+        dim_feedforward: int = 512,
+        dropout: float = 0.1,
+        max_len: int = 5000,
+        pad_idx: int = 0,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.src_tok_emb = nn.Embedding(src_vocab_size, d_model, padding_idx=pad_idx)
+        self.tgt_tok_emb = nn.Embedding(tgt_vocab_size, d_model, padding_idx=pad_idx)
+        self.positional_encoding = PositionalEncoding(d_model, max_len=max_len)
+
+        self.transformer = nn.Transformer(
+            d_model=d_model,
+            nhead=nhead,
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,  # easier shapes: (batch, seq, feature)
+        )
+
+        self.generator = nn.Linear(d_model, tgt_vocab_size)
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def encode(self, src: torch.Tensor, src_key_padding_mask: torch.Tensor):
+        # src: (batch, src_len)
+        src_emb = self.src_tok_emb(src) * math.sqrt(self.d_model)
+        src_emb = self.positional_encoding(src_emb)
+        memory = self.transformer.encoder(src_emb, src_key_padding_mask=src_key_padding_mask)
+        return memory
+
+    def decode(
+        self,
+        tgt: torch.Tensor,
+        memory: torch.Tensor,
+        tgt_key_padding_mask: torch.Tensor,
+        memory_key_padding_mask: torch.Tensor,
+        tgt_mask: torch.Tensor = None,
+    ):
+        # tgt: (batch, tgt_len)
+        tgt_emb = self.tgt_tok_emb(tgt) * math.sqrt(self.d_model)
+        tgt_emb = self.positional_encoding(tgt_emb)
+        out = self.transformer.decoder(
+            tgt_emb,
+            memory,
+            tgt_mask=tgt_mask,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+        )
+        logits = self.generator(out)  # (batch, tgt_len, vocab)
+        return logits
+
+    def forward(
+        self,
+        src: torch.Tensor,
+        tgt: torch.Tensor,
+        src_key_padding_mask: torch.Tensor,
+        tgt_key_padding_mask: torch.Tensor,
+        memory_key_padding_mask: torch.Tensor = None,
+        tgt_mask: torch.Tensor = None,
+    ):
+        memory = self.encode(src, src_key_padding_mask=src_key_padding_mask)
+        logits = self.decode(
+            tgt,
+            memory,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=memory_key_padding_mask,
+            tgt_mask=tgt_mask,
+        )
+        return logits
+
+
+# -------------------------
+# Mask helpers
+# -------------------------
+def make_src_key_padding_mask(src: torch.Tensor, pad_idx: int = 0) -> torch.Tensor:
+    # src: (batch, src_len) -> mask: (batch, src_len) with True where padding
+    return (src == pad_idx)
+
+
+def make_tgt_key_padding_mask(tgt: torch.Tensor, pad_idx: int = 0) -> torch.Tensor:
+    return (tgt == pad_idx)
+
+
+def generate_square_subsequent_mask(sz: int, device=None) -> torch.Tensor:
+    if sz not in _mask_cache:
+        mask = torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
+        _mask_cache[sz] = mask
+    mask = _mask_cache[sz]
+    return mask.to(device) if device else mask
+
+def parallel_scheduled_sampling(model, src, tgt_input, tgt_output, src_key_padding_mask, pad_idx, prob=0.3):
+    """Fast alternative to autoregressive - mix teacher forcing with predictions"""
+    batch_size, seq_len = tgt_input.shape
+    
+    # Get predictions in one forward pass (no causal mask for prediction)
+    with torch.no_grad():
+        # Use a small temperature for more diverse predictions
+        pred_logits = model(
+            src, 
+            tgt_input, 
+            src_key_padding_mask=src_key_padding_mask,
+            tgt_key_padding_mask=make_tgt_key_padding_mask(tgt_input, pad_idx),
+            tgt_mask=None,  # No causal mask for parallel prediction
+            memory_key_padding_mask=src_key_padding_mask
+        )
+        # Use temperature sampling for more diversity
+        temperature = 0.8
+        scaled_logits = pred_logits / temperature
+        predictions = torch.softmax(scaled_logits, dim=-1).argmax(-1)
+    
+    # Replace some tokens in tgt_input with predictions
+    replace_mask = torch.rand(batch_size, seq_len, device=src.device) < prob
+    mixed_input = tgt_input.clone()
+    mixed_input[replace_mask] = predictions[replace_mask]
+    
+    # Final forward pass with proper causal mask for training
+    tgt_mask = generate_square_subsequent_mask(seq_len, device=src.device)
+    logits = model(
+        src,
+        mixed_input,
+        src_key_padding_mask=src_key_padding_mask,
+        tgt_key_padding_mask=make_tgt_key_padding_mask(mixed_input, pad_idx),
+        tgt_mask=tgt_mask,
+        memory_key_padding_mask=src_key_padding_mask
+    )
+    
+    return logits
+
+
+
+# -------------------------
+# Training / evaluation loops
+# -------------------------
+def train_one_epoch(
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    criterion: nn.CrossEntropyLoss,
+    dataloader: DataLoader,
+    device: torch.device,
+    pad_idx: int,
+    grad_clip: float,
+    teacher_forcing_ratio: float,
+    scheduler
+):
+    model.train()
+    total_loss = 0.0
+    iters = 0
+
+    for batch in dataloader:
+        src, tgt, src_lens, tgt_lens = batch
+        src = src.to(device)
+        tgt = tgt.to(device)
+
+        # For Transformer: decoder input is tgt_input (without last token)
+        # and labels are tgt_output (without first token)
+        tgt_input = tgt[:, :-1]
+        tgt_output = tgt[:, 1:]  # expected tokens
+
+        src_key_padding_mask = make_src_key_padding_mask(src, pad_idx=pad_idx)  # (batch, src_len)
+        tgt_key_padding_mask = make_tgt_key_padding_mask(tgt_input, pad_idx=pad_idx)
+
+        # teacher forcing: with probability teacher_forcing_ratio we feed the true tgt_input,
+        # otherwise we can feed model predictions step-by-step. For simplicity & speed we
+        # approximate teacher forcing by mixing: with prob 1 use true tgt_input (standard).
+        # If advanced per-step forcing is needed, replace with autoregressive loop.
+        use_teacher_forcing = random.random() < teacher_forcing_ratio
+
+        if use_teacher_forcing:
+            tgt_mask = generate_square_subsequent_mask(tgt_input.size(1), device=device)
+            logits = model(
+                src,
+                tgt_input,
+                src_key_padding_mask=src_key_padding_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
+                tgt_mask=tgt_mask,
+            )
+        else:
+            # FAST PATH: Parallel scheduled sampling instead of autoregressive
+            logits = parallel_scheduled_sampling(
+                model, src, tgt_input, tgt_output, 
+                src_key_padding_mask, pad_idx, prob=0.3
+            )
+
+        # logits: (batch, tgt_len, vocab)
+        logits_flat = logits.view(-1, logits.size(-1))
+        tgt_out_flat = tgt_output.contiguous().view(-1)
+
+        loss = criterion(logits_flat, tgt_out_flat)
+
+        optimizer.zero_grad()
+        loss.backward()
+
+        if grad_clip is not None and grad_clip > 0:
+            clip_grad_norm_(model.parameters(), grad_clip)
+
+        optimizer.step()
+        scheduler.step()
+
+        total_loss += loss.item()
+        iters += 1
+
+    return total_loss / max(1, iters)
+
+
+def evaluate_one_epoch(
+    model: nn.Module,
+    criterion: nn.CrossEntropyLoss,
+    dataloader: DataLoader,
+    device: torch.device,
+    pad_idx: int,
+    max_decoding_len: int = 200,
+    src_vocab: RomanVocabulary = None,
+    tgt_vocab: DevanagariVocabulary = None,
+):
+    model.eval()
+    total_loss = 0.0
+    iters = 0
+    total_tokens = 0
+    correct_tokens = 0
+
+    all_examples = []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            src, tgt, src_lens, tgt_lens = batch
+            src = src.to(device)
+            tgt = tgt.to(device)
+            tgt_input = tgt[:, :-1]
+            tgt_output = tgt[:, 1:]
+
+            src_key_padding_mask = make_src_key_padding_mask(src, pad_idx=pad_idx)
+            tgt_key_padding_mask = make_tgt_key_padding_mask(tgt_input, pad_idx=pad_idx)
+            tgt_mask = generate_square_subsequent_mask(tgt_input.size(1), device=device)
+
+            logits = model(
+                src,
+                tgt_input,
+                src_key_padding_mask=src_key_padding_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
+                tgt_mask=tgt_mask,
+            )
+
+            logits_flat = logits.view(-1, logits.size(-1))
+            tgt_out_flat = tgt_output.contiguous().view(-1)
+            loss = criterion(logits_flat, tgt_out_flat)
+
+            total_loss += loss.item()
+            iters += 1
+
+            # Greedy decoding for accuracy / sample printing
+            batch_size = src.size(0)
+            memory = model.encode(src, src_key_padding_mask=src_key_padding_mask)
+            ys = torch.full((batch_size, 1), fill_value=1, dtype=torch.long, device=device)  # <sos>=1
+
+            for _ in range(max_decoding_len):
+                tgt_mask = generate_square_subsequent_mask(ys.size(1), device=device)
+                out = model.decode(
+                    ys,
+                    memory,
+                    tgt_key_padding_mask=(ys == pad_idx),
+                    memory_key_padding_mask=src_key_padding_mask,
+                    tgt_mask=tgt_mask,
+                )
+                next_logits = out[:, -1, :]
+                next_tokens = next_logits.argmax(dim=-1, keepdim=True)
+                ys = torch.cat([ys, next_tokens], dim=1)
+
+            # ys includes <sos> + tokens. Convert to words and compare to tgt
+            predicted_seq = ys[:, 1 : 1 + tgt_output.size(1)]  # (batch, tgt_len)
+            # token-level accuracy (ignoring pad)
+            mask = (tgt_output != pad_idx)
+            total_tokens += mask.sum().item()
+            correct_tokens += ((predicted_seq == tgt_output) & mask).sum().item()
+
+            # Save a few example strings for printing
+            if src_vocab and tgt_vocab and len(all_examples) < 8:
+                for i in range(min(2, batch_size)):
+                    src_tokens = src[i].cpu().tolist()
+                    tgt_tokens = tgt_output[i].cpu().tolist()
+                    pred_tokens = predicted_seq[i].cpu().tolist()
+                    src_str = src_vocab.decode(src_tokens)
+                    tgt_str = tgt_vocab.decode(tgt_tokens)
+                    pred_str = tgt_vocab.decode(pred_tokens)
+                    all_examples.append((src_str, tgt_str, pred_str))
+
+    avg_loss = total_loss / max(1, iters)
+    token_acc = correct_tokens / (total_tokens + 1e-12)
+    return avg_loss, token_acc, all_examples
+
+
+# -------------------------
+# Training harness / main
+# -------------------------
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # deterministic flags (might slow down training)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def build_dataloaders_from_config(config: dict):
+    preproc = DataPreprocessor(config)
+    # This will read files from the config path and apply sampling if needed
+    train_loader, val_loader, test_loader, roman_vocab, devanagari_vocab = preproc.prepare_data()
+    return train_loader, val_loader, test_loader, roman_vocab, devanagari_vocab
+
+
+def save_checkpoint(state: dict, save_dir: str, epoch: int):
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, f"checkpoint_epoch{epoch}.pt")
+    torch.save(state, path)
+    print(f"Saved checkpoint: {path}")
+
+
+def main(config: dict):
+    # config is a dict (loaded from YAML or provided programmatically)
+    seed = config.get("seed", 42)
+    set_seed(seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    # Build data loaders and vocabularies (uses your preprocessor which builds vocab from training data)
+    train_loader, val_loader, test_loader, roman_vocab, devanagari_vocab = build_dataloaders_from_config(config)
+
+    src_vocab_size = len(roman_vocab)
+    tgt_vocab_size = len(devanagari_vocab)
+    pad_idx = roman_vocab.char2idx.get("<pad>", 0)
+    sos_idx = roman_vocab.char2idx.get("<sos>", 1)
+    eos_idx = roman_vocab.char2idx.get("<eos>", 2)
+
+    # Model selection (only transformer implemented here, but config has model_type option)
+    model_type = config.get("model_type", "transformer")
+    print(model_type)
+    if model_type != "transformer":
+        raise NotImplementedError("Only transformer model_type is implemented in this script.")
+
+    d_model = config.get("d_model", 256)
+    print(f'd_model')
+
+    nhead = config.get("nhead", 8)
+    num_encoder_layers=config.get("num_encoder_layers", 2)
+    num_decoder_layers=config.get("num_decoder_layers", 2)
+    dim_feedforward=config.get("dim_feedforward", 512)
+
+    print(f'nhead: {nhead} \n enco layers: {num_encoder_layers} \n deco layers: {num_decoder_layers} \n dim_feedforwar: {dim_feedforward}')
+
+    model = TransformerSeq2Seq(
+        src_vocab_size=src_vocab_size,
+        tgt_vocab_size=tgt_vocab_size,
+        d_model=d_model,
+        nhead=nhead,
+        num_encoder_layers=config.get("num_encoder_layers", 2),
+        num_decoder_layers=config.get("num_decoder_layers", 2),
+        dim_feedforward=config.get("dim_feedforward", 512),
+        dropout=config.get("transformer_dropout", 0.1),
+        max_len=config.get("max_len", 5000),
+        pad_idx=pad_idx,
+    ).to(device)
+
+    min_lr = config.get("min_lr", 1e-6)
+    if isinstance(min_lr, str):
+        min_lr = float(min_lr)
+
+    # Optimizer / scheduler / loss
+    # optimizer = optim.Adam(model.parameters(), lr=config.get("learning_rate", 1e-3))
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     factor=config.get("lr_decay_factor", 0.8),
+    #     patience=config.get("lr_patience", 3),
+    #     min_lr=min_lr,
+    # )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
+
+    model_dim = config.get("d_model", 256)
+    warmup_steps = 4000
+    def noam_lr_lambda(step):
+        step = max(1, step)
+        return (model_dim ** -0.5) * min(step ** -0.5, step * (warmup_steps ** -1.5))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=noam_lr_lambda)
+
+
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+
+    num_epochs = config.get("num_epochs", 50)
+    grad_clip = config.get("grad_clip", 1.0)
+    teacher_forcing_ratio = config.get("teacher_forcing_ratio", 0.99)
+    final_teacher_forcing = config.get("final_teacher_forcing", 0.2)
+    teacher_forcing_decay = config.get("teacher_forcing_decay", 0.95)
+
+    # Early stopping
+    best_val = float("inf")
+    epochs_no_improve = 0
+    patience = config.get("patience", 7)
+    save_dir = config.get("save_dir", "./ckpts")
+
+    for epoch in range(1, num_epochs + 1):
+        t0 = time.time()
+        print(f"\nEpoch {epoch}/{num_epochs} - teacher_forcing={teacher_forcing_ratio:.4f}")
+
+        train_loss = train_one_epoch(
+            model,
+            optimizer,
+            criterion,
+            train_loader,
+            device,
+            pad_idx,
+            grad_clip,
+            teacher_forcing_ratio,
+            scheduler
+        )
+        
+        t1 = time.time()
+        
+        # Evaluate every 3 epochs OR on first epoch OR on last epoch
+        if epoch % 3 == 0 or epoch == 1 or epoch == num_epochs:
+            val_loss, val_acc, examples = evaluate_one_epoch(
+                model,
+                criterion,
+                val_loader,
+                device,
+                pad_idx,
+                max_decoding_len=200,
+                src_vocab=roman_vocab,
+                tgt_vocab=devanagari_vocab,
+            )
+            
+            # Update scheduler based on validation loss
+            # scheduler.step(val_loss)
+            
+            print(f"Epoch {epoch} done in {t1-t0:.1f}s — train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_token_acc={val_acc:.4f}")
+            
+            # Print examples only when we do full evaluation
+            print("Examples (src | gold | pred):")
+            for s, g, p in examples[:6]:
+                print(f"  {s}  |  {g}  |  {p}")
+                
+            # Save checkpoint on improvement (only when we evaluate)
+            if val_loss < best_val - 1e-6:
+                best_val = val_loss
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                print(f"No improvement for {epochs_no_improve} epoch(s).")
+                
+            save_checkpoint(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_loss": val_loss,
+                        "config": config,
+                        "roman_vocab": roman_vocab,
+                        "devanagari_vocab": devanagari_vocab,
+                    },
+                    save_dir,
+                    epoch,
+                )
+                
+        else:
+            # For epochs without evaluation, just print training info
+            print(f"Epoch {epoch} done in {t1-t0:.1f}s — train_loss={train_loss:.4f} (no eval this epoch)")
+            
+            # For non-evaluation epochs, we still need to track early stopping
+            # But since we don't have val_loss, we increment the counter
+            # epochs_no_improve += 1
+            print(f"No evaluation this epoch - early stopping counter: {epochs_no_improve}")
+
+        # Early stop (check every epoch, but only reset on evaluation epochs)
+        if epochs_no_improve >= patience:
+            print("Early stopping triggered.")
+            break
+
+        # Decay teacher forcing every epoch
+        teacher_forcing_ratio = max(final_teacher_forcing, teacher_forcing_ratio * teacher_forcing_decay)
+
+    # Final evaluation on test set
+    print("\nFinal evaluation on test set:")
+    test_loss, test_acc, test_examples = evaluate_one_epoch(
+        model,
+        criterion,
+        test_loader,
+        device,
+        pad_idx,
+        max_decoding_len=200,
+        src_vocab=roman_vocab,
+        tgt_vocab=devanagari_vocab,
+    )
+    print(f"Test loss: {test_loss:.4f}, Test token accuracy: {test_acc:.4f}")
+    print("Test examples:")
+    for s, g, p in test_examples[:10]:
+        print(f"  {s}  |  {g}  |  {p}")
+
+
+# -------------------------
+# CLI: read YAML config and run
+# -------------------------
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
+    args = parser.parse_args()
+
+    with open(args.config, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    main(cfg)
+    
+    
+first understand the approach, now if you see that sampling is a crucial part of pipeline where i can only use 100k examples so i have to be smart about this, lets approach this first in a diagnostic way, i need some way to evaluate my current sample and then maybe we can spot some issues and come up with better sampling methods, another dimension along which i was thinking was that on which orthographic units / chars my current model is failing on, and how are these units/chars represented in my current sample, something like, although im open for any ideas that you may have for better sampling
+

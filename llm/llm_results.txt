@@ -1,0 +1,6 @@
+📊 FINAL EVALUATION RESULTS (LLM OUTPUTS) TEMPERATURE = 0
+==================================================
+Word-level Exact Accuracy (ACC):          0.5141
+Character-level F1 Score (Mean F-score):  0.8929
+MRR:                                      0.5141
+MAP_ref:                                  0.5141
